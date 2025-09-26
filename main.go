@@ -1,15 +1,55 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 	"sync/atomic"
+	"time"
+
+	"github.com/Blustak/bootdev-chirpy/internal/database"
+	"github.com/google/uuid"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
+)
+
+type Platform string
+
+const (
+    platformDev Platform = "dev"
 )
 
 type apiConfig struct {
 	fileServerHits atomic.Int32
+    platform Platform
+	dbQueries      *database.Queries
+}
+
+
+func MarshalDatabaseUserJSON(u database.User) ([]byte,error) {
+    user := struct {
+        ID uuid.UUID `json:"id"`
+        CreatedAt time.Time `json:"created_at"`
+        UpdatedAt time.Time `json:"updated_at"`
+        Email string `json:"email"`
+    }{
+        ID: u.ID,
+        CreatedAt: u.CreatedAt,
+        UpdatedAt: u.UpdatedAt,
+        Email: u.Email,
+    }
+    return json.Marshal(user)
+}
+
+var restricted_words = [...]string{
+	"sharbert",
+	"kerfuffle",
+	"fornax",
 }
 
 func (cfg *apiConfig) middlewareIncrementHits(next http.Handler) http.Handler {
@@ -20,13 +60,22 @@ func (cfg *apiConfig) middlewareIncrementHits(next http.Handler) http.Handler {
 }
 
 func main() {
+	godotenv.Load()
+	dbURL := os.Getenv("DB_URL")
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		panic("Couldn't connect to postgresql database.")
+	}
 	apiState := apiConfig{
 		fileServerHits: atomic.Int32{},
+		dbQueries:      database.New(db),
+        platform: Platform(os.Getenv("PLATFORM")),
 	}
 	serve := http.NewServeMux()
 
 	serve.HandleFunc("GET /api/healthz", readinessHandler)
-    serve.HandleFunc("POST /api/validate_chirp", validateChirpHandler)
+	serve.HandleFunc("POST /api/validate_chirp", validateChirpHandler)
+    serve.HandleFunc("POST /api/users", apiState.addUserHandler)
 
 	serve.HandleFunc("GET /admin/metrics", apiState.hitsHandler)
 	serve.HandleFunc("POST /admin/reset", apiState.resetHandler)
@@ -67,68 +116,100 @@ func (cfg *apiConfig) hitsHandler(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("Content-Type", "text/plain; charset=utf-8")
+    if cfg.platform != platformDev {
+        w.WriteHeader(403)
+        return
+    }
 	cfg.fileServerHits.Swap(int32(0))
+    cfg.dbQueries.ResetUserTable(r.Context())
 	w.WriteHeader(200)
 	w.Write([]byte("Reset count."))
 }
 
 func validateChirpHandler(w http.ResponseWriter, r *http.Request) {
-    type chirp struct {
-        Body string `json:"body"`
-    }
-    type serverError struct {
-        Error string `json:"error"`
-    }
-    type validChirp struct {
-        Valid bool `json:"valid"`
-    }
+	type chirp struct {
+		Body string `json:"body"`
+	}
+	type cleanChirp struct {
+		CleanedBody string `json:"cleaned_body"`
+	}
 
-    decoder := json.NewDecoder(r.Body)
-    var reqChirp chirp
-    if err := decoder.Decode(&reqChirp); err != nil{
-        errMsg := fmt.Sprintf("error decoding chirp: %s",err)
+	decoder := json.NewDecoder(r.Body)
+	var reqChirp chirp
+	if err := decoder.Decode(&reqChirp); err != nil {
+        clientErrorResponse(w,400,err)
+		return
+	}
 
-        respBody := serverError{
-            Error: errMsg,
-        }
-        data,err := json.Marshal(respBody)
-        if err != nil {
-            log.Printf("error marshalling JSON: %s",err)
-            w.WriteHeader(500)
-            return //Can't do much else if the marshalling error is happening
-        }
+	if len(reqChirp.Body) > 140 {
+        clientErrorResponse(w,400,errors.New("chirp too long"))
+	}
 
-        log.Printf(errMsg)
-        w.WriteHeader(500)
-        w.Write(data)
+	var cleanOutput cleanChirp
+	bodyWords := strings.Split(string(reqChirp.Body), " ")
+	for i, w := range bodyWords {
+		for _, word := range restricted_words {
+			if strings.ToLower(w) == word {
+				bodyWords[i] = "****"
+			}
+		}
+	}
+	cleanOutput.CleanedBody = strings.Join(bodyWords, " ")
+	data, err := json.Marshal(cleanOutput)
+	if err != nil {
+        serverErrorResponse(w,500,err)
+		return 
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	w.Write(data)
+
+}
+
+func (cfg *apiConfig) addUserHandler(w http.ResponseWriter, r *http.Request) {
+	reqStructure := struct {
+		Email string `json:"email"`
+	}{}
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&reqStructure); err != nil {
+		clientErrorResponse(w, 400, err)
         return
-    }
-    // Check for length of body
-    if len(reqChirp.Body) > 140 {
-        respBody := serverError{
-            Error: "chirp too long",
-        }
-        data,err := json.Marshal(respBody)
-        if err != nil {
-            log.Printf("error marshalling JSON: %s",err)
-            w.WriteHeader(500)
-            return //Can't do much else if the marshalling error is happening
-        }
-        w.WriteHeader(400)
-        w.Write(data)
-        return
-    }
-    respBody := validChirp{
-        Valid: true,
-    }
-    data,err := json.Marshal(respBody)
+	}
+    user,err := cfg.dbQueries.CreateUser(r.Context(),reqStructure.Email)
     if err != nil {
-        log.Printf("error marshalling JSON: %s",err)
-        w.WriteHeader(500)
-        return //Can't do much else if the marshalling error is happening
+        serverErrorResponse(w,500,err)
+        return
     }
-    w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(200)
+    data,err := MarshalDatabaseUserJSON(user)
+    if err != nil {
+        serverErrorResponse(w,500,err)
+        return
+    }
+    w.WriteHeader(201)
+    w.Header().Add("Content-Type","application/json")
     w.Write(data)
+}
 
+func serverErrorResponse(w http.ResponseWriter, statusCode int, err error) {
+    log.Printf("server error: %v",err)
+	w.WriteHeader(statusCode)
+	w.Header().Add("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprintf(w, "server error: %v", err)
+}
+
+func clientErrorResponse(w http.ResponseWriter, statusCode int, err error) {
+	errPayload := struct {
+		Error string `json:"error"`
+	}{
+		Error: fmt.Sprintf("error: %v", err),
+	}
+    log.Printf("error: %v",err)
+	data, err := json.Marshal(errPayload)
+	if err != nil {
+        serverErrorResponse(w,500,err)
+		return
+	}
+	w.WriteHeader(statusCode)
+	w.Header().Add("Content-Type", "application/json")
+	w.Write(data)
 }
