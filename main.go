@@ -11,10 +11,10 @@ type apiConfig struct {
 }
 
 func (cfg *apiConfig) middlewareIncrementHits(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        cfg.fileServerHits.Add(1)
-        next.ServeHTTP(w,r)
-    })
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cfg.fileServerHits.Add(1)
+		next.ServeHTTP(w, r)
+	})
 }
 
 func main() {
@@ -23,11 +23,11 @@ func main() {
 	}
 	serve := http.NewServeMux()
 
-	serve.HandleFunc("/healthz", readinessHandler)
-	serve.HandleFunc("/metrics", apiState.hitsHandler)
-	serve.HandleFunc("/reset", apiState.resetHandler)
+	serve.HandleFunc("GET /api/healthz", readinessHandler)
+	serve.HandleFunc("GET /admin/metrics", apiState.hitsHandler)
+	serve.HandleFunc("POST /admin/reset", apiState.resetHandler)
 	fileServeHandle := http.StripPrefix(
-			"/app", http.FileServer(http.Dir(".")))
+		"/app", http.FileServer(http.Dir(".")))
 	serve.Handle("/app/", apiState.middlewareIncrementHits(fileServeHandle))
 	serve.Handle("/assets", http.FileServer(http.Dir("./assets")))
 
@@ -46,10 +46,18 @@ func readinessHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) hitsHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Add("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Add("Content-Type", "text/html")
 	w.WriteHeader(200)
-    hits_str := fmt.Appendf(nil, "Hits: %d", cfg.fileServerHits.Load())
-    w.Write(hits_str)
+	fmt.Fprintf(
+		w,
+		`<html>
+  <body>
+    <h1>Welcome, Chirpy Admin</h1>
+    <p>Chirpy has been visited %d times!</p>
+  </body>
+</html> `,
+		cfg.fileServerHits.Load(),
+	)
 }
 
 func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
