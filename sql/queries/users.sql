@@ -8,3 +8,7 @@ INSERT INTO users(id, created_at, updated_at, email) VALUES(
 
 -- name: ResetUserTable :exec
 DELETE FROM users;
+
+-- name: GetUserByEmail :one
+SELECT * FROM users WHERE email = @email;
+
