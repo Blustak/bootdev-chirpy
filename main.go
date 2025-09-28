@@ -89,9 +89,12 @@ func main() {
 	serve := http.NewServeMux()
 
 	serve.HandleFunc("GET /api/healthz", readinessHandler)
-	serve.HandleFunc("POST /api/chirps", apiState.chirpsHandler)
-    serve.HandleFunc("GET /api/chirps", apiState.getAllChirpsHandler)
+
 	serve.HandleFunc("POST /api/users", apiState.addUserHandler)
+
+    serve.HandleFunc("POST /api/chirps", apiState.chirpsHandler)
+    serve.HandleFunc("GET /api/chirps", apiState.getAllChirpsHandler)
+    serve.HandleFunc("GET /api/chirps/{chirpID}", apiState.getChirpByIdHandler)
 
 	serve.HandleFunc("GET /admin/metrics", apiState.hitsHandler)
 	serve.HandleFunc("POST /admin/reset", apiState.resetHandler)
@@ -222,6 +225,29 @@ func (cfg *apiConfig) getAllChirpsHandler(w http.ResponseWriter,r *http.Request)
     }
     w.WriteHeader(200)
     w.Header().Add("Content-Type", "application/json")
+    w.Write(data)
+
+}
+
+func (cfg *apiConfig) getChirpByIdHandler(w http.ResponseWriter, r *http.Request) {
+    id,err:= uuid.Parse(r.PathValue("chirpID"))
+    if err != nil {
+        clientErrorResponse(w,404,err)
+        return
+    }
+    query,err := cfg.dbQueries.GetChirpByID(r.Context(),id)
+    if err != nil {
+        clientErrorResponse(w,404,err)
+        return
+    }
+    chirp := Chirp(query)
+    data,err := json.Marshal(chirp)
+    if err != nil {
+        serverErrorResponse(w,500,err)
+        return
+    }
+    w.WriteHeader(200)
+    w.Header().Add("Content-Type","application/json")
     w.Write(data)
 
 }
