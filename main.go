@@ -12,29 +12,67 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Blustak/bootdev-chirpy/internal/auth"
 	"github.com/Blustak/bootdev-chirpy/internal/database"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 )
 
-type Platform string
-
 type Chirp struct {
+	database.Chirp
+}
+
+func (c Chirp) MarshalJSON() ([]byte, error) {
+	return json.Marshal(map[string]any{
+		"id":         c.ID,
+		"created_at": c.CreatedAt,
+		"updated_at": c.UpdatedAt,
+		"body":       c.Body,
+		"user_id":    c.UserID,
+	})
+}
+
+type TUser interface{
+    User() User
+}
+
+type createUserRow database.CreateUserRow
+type getUserByEmailRow database.GetUserByEmailRow
+
+
+
+func (u createUserRow) User() User {
+    return User{
+        ID: u.ID,
+        CreatedAt: u.CreatedAt,
+        UpdatedAt: u.UpdatedAt,
+        Email: u.Email,
+    }
+}
+
+func (u getUserByEmailRow) User() User {
+    return User{
+        ID:u.ID,
+        CreatedAt: u.CreatedAt,
+        UpdatedAt: u.UpdatedAt,
+        Email: u.Email,
+    }
+}
+
+type User struct {
     ID uuid.UUID `json:"id"`
     CreatedAt time.Time `json:"created_at"`
     UpdatedAt time.Time `json:"updated_at"`
-	Body   string    `json:"body"`
-	UserID uuid.UUID `json:"user_id"`
+    Email string    `json:"email"`
 }
 
-func (c *Chirp) FromQuery(q database.Chirp) {
-    c.ID = q.ID
-    c.CreatedAt = q.CreatedAt
-    c.UpdatedAt = q.UpdatedAt
-    c.Body = q.Body
-    c.UserID = q.UserID
+type userApiRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
+
+type Platform string
 
 const (
 	platformDev Platform = "dev"
@@ -44,21 +82,6 @@ type apiConfig struct {
 	fileServerHits atomic.Int32
 	platform       Platform
 	dbQueries      *database.Queries
-}
-
-func MarshalDatabaseUserJSON(u database.User) ([]byte, error) {
-	user := struct {
-		ID        uuid.UUID `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Email     string    `json:"email"`
-	}{
-		ID:        u.ID,
-		CreatedAt: u.CreatedAt,
-		UpdatedAt: u.UpdatedAt,
-		Email:     u.Email,
-	}
-	return json.Marshal(user)
 }
 
 var restricted_words = [...]string{
@@ -92,9 +115,11 @@ func main() {
 
 	serve.HandleFunc("POST /api/users", apiState.addUserHandler)
 
-    serve.HandleFunc("POST /api/chirps", apiState.chirpsHandler)
-    serve.HandleFunc("GET /api/chirps", apiState.getAllChirpsHandler)
-    serve.HandleFunc("GET /api/chirps/{chirpID}", apiState.getChirpByIdHandler)
+    serve.HandleFunc("POST /api/login", apiState.userLoginHandler)
+
+	serve.HandleFunc("POST /api/chirps", apiState.chirpsHandler)
+	serve.HandleFunc("GET /api/chirps", apiState.getAllChirpsHandler)
+	serve.HandleFunc("GET /api/chirps/{chirpID}", apiState.getChirpByIdHandler)
 
 	serve.HandleFunc("GET /admin/metrics", apiState.hitsHandler)
 	serve.HandleFunc("POST /admin/reset", apiState.resetHandler)
@@ -148,10 +173,10 @@ func (cfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 func (cfg *apiConfig) chirpsHandler(w http.ResponseWriter, r *http.Request) {
 
 	decoder := json.NewDecoder(r.Body)
-    var requestChirp struct{
-        ChirpBody string `json:"body"`
-        ID uuid.UUID `json:"user_id"`
-}
+	var requestChirp struct {
+		ChirpBody string    `json:"body"`
+		ID        uuid.UUID `json:"user_id"`
+	}
 	if err := decoder.Decode(&requestChirp); err != nil {
 		clientErrorResponse(w, 400, err)
 		return
@@ -159,6 +184,7 @@ func (cfg *apiConfig) chirpsHandler(w http.ResponseWriter, r *http.Request) {
 
 	if len(requestChirp.ChirpBody) > 140 {
 		clientErrorResponse(w, 400, errors.New("chirp too long"))
+        return
 	}
 
 	bodyWords := strings.Split(string(requestChirp.ChirpBody), " ")
@@ -170,11 +196,13 @@ func (cfg *apiConfig) chirpsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	requestChirp.ChirpBody = strings.Join(bodyWords, " ")
-    res,err := cfg.dbQueries.AddChirp(r.Context(),database.AddChirpParams(requestChirp))
-    if err != nil {
-        serverErrorResponse(w,500,err)
-        return
-    }
+	var res Chirp
+	var err error
+	res.Chirp, err = cfg.dbQueries.AddChirp(r.Context(), database.AddChirpParams(requestChirp))
+	if err != nil {
+		serverErrorResponse(w, 500, err)
+		return
+	}
 	data, err := json.Marshal(Chirp(res))
 	if err != nil {
 		serverErrorResponse(w, 500, err)
@@ -186,21 +214,32 @@ func (cfg *apiConfig) chirpsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) addUserHandler(w http.ResponseWriter, r *http.Request) {
-	reqStructure := struct {
-		Email string `json:"email"`
-	}{}
+	reqStructure := userApiRequest{}
 	decoder := json.NewDecoder(r.Body)
 	if err := decoder.Decode(&reqStructure); err != nil {
 		clientErrorResponse(w, 400, err)
 		return
 	}
-	user, err := cfg.dbQueries.CreateUser(r.Context(), reqStructure.Email)
+	hashedPassword, err := auth.HashPassword(reqStructure.Password)
 	if err != nil {
+        log.Printf("error hashing password: %v\n",err)
+		serverErrorResponse(w, 400, err)
+		return
+	}
+    q, err := cfg.dbQueries.CreateUser(r.Context(),
+		database.CreateUserParams{
+			Email:          reqStructure.Email,
+			HashedPassword: hashedPassword,
+		})
+	if err != nil {
+        log.Printf("error adding user : %v\n",err)
 		serverErrorResponse(w, 500, err)
 		return
 	}
-	data, err := MarshalDatabaseUserJSON(user)
+    user := createUserRow(q).User()
+	data, err := json.Marshal(user)
 	if err != nil {
+        log.Printf("error marshaling response : %v\n",err)
 		serverErrorResponse(w, 500, err)
 		return
 	}
@@ -208,47 +247,94 @@ func (cfg *apiConfig) addUserHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("Content-Type", "application/json")
 	w.Write(data)
 }
-func (cfg *apiConfig) getAllChirpsHandler(w http.ResponseWriter,r *http.Request) {
-    var chirps []Chirp
-    query,err := cfg.dbQueries.GetAllChirps(r.Context())
-    if err != nil {
+
+func (cfg *apiConfig) userLoginHandler(w http.ResponseWriter, r *http.Request) {
+    var req userApiRequest
+    var err error
+
+    decoder := json.NewDecoder(r.Body)
+    if err = decoder.Decode(&req); err != nil {
         serverErrorResponse(w,500,err)
         return
     }
-    for _,q := range query {
-        chirps = append(chirps, Chirp(q))
+    row,err := cfg.dbQueries.GetUserByEmail(r.Context(),req.Email)
+    if err != nil || row == (database.GetUserByEmailRow{}){
+        log.Printf("error getting user by email: %v",err)
+        w.WriteHeader(401)
+        w.Header().Add("Content-Type","text/plain; charset=utf-8")
+        w.Write([]byte("incorrect email or password"))
+        return
     }
-    data,err := json.Marshal(chirps)
+
+    hashedPass,err := cfg.dbQueries.GetHashedPasswordByID(r.Context(),row.ID)
     if err != nil {
+        log.Printf("error getting hashed password:%v",err)
         serverErrorResponse(w,500,err)
         return
     }
-    w.WriteHeader(200)
-    w.Header().Add("Content-Type", "application/json")
-    w.Write(data)
-
-}
-
-func (cfg *apiConfig) getChirpByIdHandler(w http.ResponseWriter, r *http.Request) {
-    id,err:= uuid.Parse(r.PathValue("chirpID"))
-    if err != nil {
-        clientErrorResponse(w,404,err)
+    ok,err := auth.CheckPasswordHash(req.Password,hashedPass)
+    if err != nil || !ok {
+        log.Printf("error checking hashed password:%v",err)
+        w.WriteHeader(401)
+        w.Header().Add("Content-Type","text/plain; charset=utf-8")
+        w.Write([]byte("incorrect email or password"))
         return
     }
-    query,err := cfg.dbQueries.GetChirpByID(r.Context(),id)
+    user :=  getUserByEmailRow(row).User()
+    data,err := json.Marshal(user)
     if err != nil {
-        clientErrorResponse(w,404,err)
-        return
-    }
-    chirp := Chirp(query)
-    data,err := json.Marshal(chirp)
-    if err != nil {
+        log.Printf("error marshalling response: %v",err)
         serverErrorResponse(w,500,err)
         return
     }
     w.WriteHeader(200)
     w.Header().Add("Content-Type","application/json")
     w.Write(data)
+
+}
+
+func (cfg *apiConfig) getAllChirpsHandler(w http.ResponseWriter, r *http.Request) {
+	var chirps []Chirp
+	query, err := cfg.dbQueries.GetAllChirps(r.Context())
+	if err != nil {
+		serverErrorResponse(w, 500, err)
+		return
+	}
+
+	for _, q := range query {
+		chirps = append(chirps, Chirp{Chirp: q})
+	}
+	data, err := json.Marshal(chirps)
+	if err != nil {
+		serverErrorResponse(w, 500, err)
+		return
+	}
+	w.WriteHeader(200)
+	w.Header().Add("Content-Type", "application/json")
+	w.Write(data)
+
+}
+
+func (cfg *apiConfig) getChirpByIdHandler(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("chirpID"))
+	if err != nil {
+		clientErrorResponse(w, 404, err)
+		return
+	}
+	var query Chirp
+	query.Chirp, err = cfg.dbQueries.GetChirpByID(r.Context(), id)
+	if err != nil {
+		clientErrorResponse(w, 404, err)
+		return
+	}
+	data, err := json.Marshal(query)
+	if err != nil {
+		serverErrorResponse(w, 500, err)
+		return
+	}
+	w.WriteHeader(200)
+	w.Header().Add("Content-Type", "application/json")
+	w.Write(data)
 
 }
 

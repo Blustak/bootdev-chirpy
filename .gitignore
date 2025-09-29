@@ -1,2 +1,4 @@
 bootdev-chirpy
 .env
+.envrc
+test_files/
