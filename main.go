@@ -65,11 +65,13 @@ type User struct {
     CreatedAt time.Time `json:"created_at"`
     UpdatedAt time.Time `json:"updated_at"`
     Email string    `json:"email"`
+    Token string `json:"token"`
 }
 
 type userApiRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
+    ExpiresInSeconds int `json:"expires_in_seconds"`
 }
 
 type Platform string
@@ -82,6 +84,7 @@ type apiConfig struct {
 	fileServerHits atomic.Int32
 	platform       Platform
 	dbQueries      *database.Queries
+    tokenSecret string
 }
 
 var restricted_words = [...]string{
@@ -108,6 +111,16 @@ func main() {
 		fileServerHits: atomic.Int32{},
 		dbQueries:      database.New(db),
 		platform:       Platform(os.Getenv("PLATFORM")),
+        tokenSecret: func() string {
+            s,ok := os.LookupEnv("TOKEN_STRING")
+            if  !ok {
+                panic("Couldn't load secret token.")
+            }
+            if len(s) < 64 {
+                panic("bad secrets token")
+            }
+            return s
+        }(),
 	}
 	serve := http.NewServeMux()
 
@@ -175,12 +188,19 @@ func (cfg *apiConfig) chirpsHandler(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
 	var requestChirp struct {
 		ChirpBody string    `json:"body"`
-		ID        uuid.UUID `json:"user_id"`
 	}
 	if err := decoder.Decode(&requestChirp); err != nil {
 		clientErrorResponse(w, 400, err)
 		return
 	}
+    token,err := auth.GetBearerToken(r.Header)
+    if err != nil {
+        clientErrorResponse(w,400,err)
+    }
+    id,err := auth.ValidateJWT(token,cfg.tokenSecret)
+    if err != nil {
+        clientErrorResponse(w,401,err)
+    }
 
 	if len(requestChirp.ChirpBody) > 140 {
 		clientErrorResponse(w, 400, errors.New("chirp too long"))
@@ -197,8 +217,10 @@ func (cfg *apiConfig) chirpsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	requestChirp.ChirpBody = strings.Join(bodyWords, " ")
 	var res Chirp
-	var err error
-	res.Chirp, err = cfg.dbQueries.AddChirp(r.Context(), database.AddChirpParams(requestChirp))
+	res.Chirp, err = cfg.dbQueries.AddChirp(r.Context(), database.AddChirpParams{
+        ChirpBody: requestChirp.ChirpBody,
+        ID: id,
+    })
 	if err != nil {
 		serverErrorResponse(w, 500, err)
 		return
@@ -281,6 +303,21 @@ func (cfg *apiConfig) userLoginHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
     user :=  getUserByEmailRow(row).User()
+    var expiresIn time.Duration
+    if req.ExpiresInSeconds <= 0 || req.ExpiresInSeconds > 60*60 {
+        expiresIn = time.Hour * 1
+    } else {
+        expiresIn,err = time.ParseDuration(fmt.Sprintf("%ds",req.ExpiresInSeconds))
+        if err != nil {
+            serverErrorResponse(w,500,err)
+            return
+        }
+    }
+    user.Token,err = auth.MakeJWT(user.ID,cfg.tokenSecret,expiresIn)
+    if err != nil {
+        serverErrorResponse(w,500,err)
+        return
+    }
     data,err := json.Marshal(user)
     if err != nil {
         log.Printf("error marshalling response: %v",err)

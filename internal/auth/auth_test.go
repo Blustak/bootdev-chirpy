@@ -1,6 +1,7 @@
 package auth_test
 
 import (
+	"net/http"
 	"testing"
 	"time"
 
@@ -234,4 +235,77 @@ func TestValidateJWT(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGetBearerToken(t *testing.T) {
+    tests := []struct {
+        name string
+        headers http.Header
+        want string
+        wantMatch bool
+        wantErr bool
+    }{
+        {
+            name: "control",
+            headers: func() http.Header {
+                h := http.Header{}
+                h.Add("Authorization", "Bearer: foobar")
+                return h
+            }(),
+            want: "foobar",
+            wantMatch: true,
+            wantErr: false,
+        },{
+            name: "bad match",
+            headers: func() http.Header {
+                h := http.Header{}
+                h.Add("Authorization", "Bearer: foopBar")
+                return h
+            }(),
+            want:"foobar",
+            wantMatch: false,
+            wantErr: false,
+        },{
+            name: "nil header",
+            headers: http.Header{},
+            want: "foobar",
+            wantMatch: false,
+            wantErr: true,
+        },{
+            name: "malformed token",
+            headers: func() http.Header {
+                h := http.Header{}
+                h.Add("Authroization","Bearer: ")
+                return h
+            }(),
+            want:"Bearer",
+            wantMatch: false,
+            wantErr: true,
+        },
+    }
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            got,gotErr := auth.GetBearerToken(tt.headers)
+            if gotErr != nil {
+                if !tt.wantErr {
+                    t.Fatalf("GetBearerToken failed unexpectedly: %v",gotErr)
+                }
+                return
+            }
+            if tt.wantErr {
+                t.Fatalf("GetBearerToken succeeded unexpectedly")
+            }
+            if got != tt.want {
+                if tt.wantMatch {
+                    t.Fatalf("GetBearerToken does not match (got:%s, want:%s)",got,tt.want)
+                }
+                return
+            }
+            if got == tt.want {
+                if !tt.wantMatch {
+                    t.Fatalf("GetBearerToken matches want, but expected no match (token:%s)",got)
+                }
+            }
+        })
+    }
 }
