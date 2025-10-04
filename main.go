@@ -155,7 +155,7 @@ func main() {
 	serve.HandleFunc("POST /api/revoke", apiState.revokeHandler)
 
 	serve.HandleFunc("POST /api/chirps", apiState.chirpsHandler)
-	serve.HandleFunc("GET /api/chirps", apiState.getAllChirpsHandler)
+	serve.HandleFunc("GET /api/chirps", apiState.getChirpsHandler)
 	serve.HandleFunc("GET /api/chirps/{chirpID}", apiState.getChirpByIdHandler)
     serve.HandleFunc("DELETE /api/chirps/{chirpID}", apiState.deleteChirpByIDHandler)
 
@@ -496,27 +496,46 @@ func (cfg *apiConfig) polkaWebhooksHandler(w http.ResponseWriter, r *http.Reques
     w.WriteHeader(204)
 }
 
-func (cfg *apiConfig) getAllChirpsHandler(w http.ResponseWriter, r *http.Request) {
-	var chirps []Chirp
-	query, err := cfg.dbQueries.GetAllChirps(r.Context())
-	if err != nil {
-		serverErrorResponse(w, 500, err)
-		return
-	}
+func (cfg *apiConfig) getChirpsHandler(w http.ResponseWriter, r *http.Request) {
+    var chirps []Chirp
+    var query []database.Chirp
+    var err error
 
-	for _, q := range query {
-		chirps = append(chirps, Chirp{Chirp: q})
-	}
-	data, err := json.Marshal(chirps)
-	if err != nil {
-		serverErrorResponse(w, 500, err)
-		return
-	}
-	w.WriteHeader(200)
-	w.Header().Add("Content-Type", "application/json")
-	w.Write(data)
-
+    authorID := r.URL.Query().Get("author_id")
+    if authorID != "" {
+        authorUUID, err := uuid.Parse(authorID)
+        if err != nil {
+            clientErrorResponse(w,401,err)
+        }
+        query, err = cfg.dbQueries.GetChirpsFromUser(r.Context(),authorUUID)
+        if err != nil {
+            if errors.Is(err,sql.ErrNoRows) {
+                clientErrorResponse(w,404,err)
+                return
+            }
+            clientErrorResponse(w,401,err)
+            return
+        }
+    
+    } else {
+        query, err = cfg.dbQueries.GetAllChirps(r.Context())
+        if err != nil {
+            clientErrorResponse(w,404,err)
+            return
+        }
+    }
+    for _,q := range query {
+        chirps = append(chirps,Chirp{Chirp: q})
+    }
+    data,err := json.Marshal(chirps)
+    if err != nil {
+        serverErrorResponse(w,500,err)
+        return
+    }
+    w.WriteHeader(200)
+    w.Write(data)
 }
+
 
 func (cfg *apiConfig) getChirpByIdHandler(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(r.PathValue("chirpID"))
