@@ -33,9 +33,6 @@ func (c Chirp) MarshalJSON() ([]byte, error) {
 	})
 }
 
-type TUser interface {
-	User() User
-}
 
 type createUserRow database.CreateUserRow
 type updateUserRow database.UpdateUserRow
@@ -48,6 +45,7 @@ func (u createUserRow) User() User {
 		CreatedAt: u.CreatedAt,
 		UpdatedAt: u.UpdatedAt,
 		Email:     u.Email,
+        IsChirpyRed: u.IsChirpyRed,
 	}
 }
 
@@ -56,7 +54,8 @@ func (u updateUserRow) User() User {
         ID: u.ID,
         CreatedAt: u.CreatedAt,
         UpdatedAt: u.UpdatedAt,
-        Email: u.Email,
+		Email:     u.Email,
+        IsChirpyRed: u.IsChirpyRed,
     }
 }
 
@@ -66,6 +65,7 @@ func (u getUserByEmailRow) User() User {
 		CreatedAt: u.CreatedAt,
 		UpdatedAt: u.UpdatedAt,
 		Email:     u.Email,
+        IsChirpyRed: u.IsChirpyRed,
 	}
 }
 
@@ -76,6 +76,7 @@ type User struct {
 	Email        string    `json:"email"`
 	Token        string    `json:"token"`
 	RefreshToken string    `json:"refresh_token"`
+    IsChirpyRed bool `json:"is_chirpy_red"`
 }
 
 type userLoginRequest struct {
@@ -147,6 +148,8 @@ func main() {
 	serve.HandleFunc("GET /api/chirps", apiState.getAllChirpsHandler)
 	serve.HandleFunc("GET /api/chirps/{chirpID}", apiState.getChirpByIdHandler)
     serve.HandleFunc("DELETE /api/chirps/{chirpID}", apiState.deleteChirpByIDHandler)
+
+    serve.HandleFunc("POST /api/polka/webhooks", apiState.polkaWebhooksHandler)
 
 	serve.HandleFunc("GET /admin/metrics", apiState.hitsHandler)
 	serve.HandleFunc("POST /admin/reset", apiState.resetHandler)
@@ -399,7 +402,7 @@ func (cfg *apiConfig) userLoginHandler(w http.ResponseWriter, r *http.Request) {
 func (cfg *apiConfig) refreshTokenHandler(w http.ResponseWriter, r *http.Request) {
 	token, err := auth.GetBearerToken(r.Header)
 	if err != nil {
-		clientErrorResponse(w, 401, err)
+		clientErrorResponse(w, 400, err)
 		return
 	}
 	refreshTokenQuery, err := cfg.dbQueries.GetUserByRefreshToken(r.Context(), token)
@@ -444,7 +447,7 @@ func (cfg *apiConfig) refreshTokenHandler(w http.ResponseWriter, r *http.Request
 func (cfg *apiConfig) revokeHandler(w http.ResponseWriter, r *http.Request) {
 	token, err := auth.GetBearerToken(r.Header)
 	if err != nil || token == "" {
-		clientErrorResponse(w, 401, errors.New("couldn't find refresh token"))
+		clientErrorResponse(w, 400, errors.New("couldn't find refresh token"))
 		return
 	}
 	if err := cfg.dbQueries.RevokeRefreshToken(r.Context(), token); err != nil {
@@ -453,6 +456,29 @@ func (cfg *apiConfig) revokeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(204)
 
+}
+
+func (cfg *apiConfig) polkaWebhooksHandler(w http.ResponseWriter, r *http.Request) {
+    var polkaWebhookEvent struct {
+        Event string `json:"event"`
+        Data struct{
+            UserID uuid.UUID `json:"user_id"`
+        } `json:"data"`
+    }
+    decoder := json.NewDecoder(r.Body)
+    if err := decoder.Decode(&polkaWebhookEvent); err != nil {
+        clientErrorResponse(w,400,err)
+        return
+    }
+    if polkaWebhookEvent.Event != "user.upgraded" {
+        w.WriteHeader(204)
+        return
+    }
+    if err := cfg.dbQueries.UpgradeUserToChirpyRed(r.Context(),polkaWebhookEvent.Data.UserID); err != nil {
+        w.WriteHeader(404)
+        return
+    }
+    w.WriteHeader(204)
 }
 
 func (cfg *apiConfig) getAllChirpsHandler(w http.ResponseWriter, r *http.Request) {
