@@ -95,6 +95,7 @@ type apiConfig struct {
 	platform       Platform
 	dbQueries      *database.Queries
 	tokenSecret    string
+    polkaAPIKey string
 }
 
 var restricted_words = [...]string{
@@ -110,6 +111,17 @@ func (cfg *apiConfig) middlewareIncrementHits(next http.Handler) http.Handler {
 	})
 }
 
+func lookupKeyOrPanic(envVariable string) string {
+    v,ok := os.LookupEnv(envVariable)
+    if !ok {
+        panic(fmt.Sprintf("Couldn't find environment variable %s", envVariable))
+    }
+    if v == "" {
+        panic(fmt.Sprintf("Empty environment variable %s", envVariable))
+    }
+    return v
+}
+
 func main() {
 	godotenv.Load()
 	dbURL := os.Getenv("DB_URL")
@@ -122,15 +134,13 @@ func main() {
 		dbQueries:      database.New(db),
 		platform:       Platform(os.Getenv("PLATFORM")),
 		tokenSecret: func() string {
-			s, ok := os.LookupEnv("TOKEN_STRING")
-			if !ok {
-				panic("Couldn't load secret token.")
-			}
+            s := lookupKeyOrPanic("TOKEN_STRING")
 			if len(s) < 64 {
 				panic("bad secrets token")
 			}
 			return s
 		}(),
+        polkaAPIKey: lookupKeyOrPanic("POLKA_KEY"),
 	}
 	serve := http.NewServeMux()
 
@@ -459,6 +469,11 @@ func (cfg *apiConfig) revokeHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) polkaWebhooksHandler(w http.ResponseWriter, r *http.Request) {
+    apiKey, err := auth.GetApiKeyToken(r.Header)
+    if err != nil || apiKey != cfg.polkaAPIKey {
+        clientErrorResponse(w,401,errors.New("unaothorized"))
+        return
+    }
     var polkaWebhookEvent struct {
         Event string `json:"event"`
         Data struct{
