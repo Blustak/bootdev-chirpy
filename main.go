@@ -500,6 +500,42 @@ func (cfg *apiConfig) getChirpByIdHandler(w http.ResponseWriter, r *http.Request
 
 }
 
+func (cfg *apiConfig) deleteChirpByIDHandler(w http.ResponseWriter, r *http.Request) {
+    accessToken,err := auth.GetBearerToken(r.Header)
+    if err != nil || accessToken == "" {
+        clientErrorResponse(w, 401, errors.New("not authorized"))
+        return
+    }
+
+    userID, err := auth.ValidateJWT(accessToken,cfg.tokenSecret)
+    if err != nil {
+        clientErrorResponse(w,401, err)
+        return
+    }
+    chirpID, err := uuid.Parse(r.PathValue("chirpID"))
+    if err != nil {
+        clientErrorResponse(w,404,err)
+        return
+    }
+    chirpQuery, err := cfg.dbQueries.GetChirpByID(
+        r.Context(),
+        chirpID,
+    )
+    if err != nil {
+        clientErrorResponse(w, 404, err)
+        return
+    }
+    if chirpQuery.UserID != userID {
+        clientErrorResponse(w,403,errors.New("user mismatch"))
+        return
+    }
+    if err = cfg.dbQueries.DeleteChirpByID(r.Context(),chirpID); err != nil {
+        serverErrorResponse(w,500,err)
+        return
+    }
+    w.WriteHeader(204)
+}
+
 func serverErrorResponse(w http.ResponseWriter, statusCode int, err error) {
 	log.Printf("server error: %v", err)
 	w.WriteHeader(statusCode)
